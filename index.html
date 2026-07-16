@@ -1107,17 +1107,26 @@ function attachExaminerHandlers() {
     const resultsBody = document.getElementById('monitorResults');
     resultsBody.innerHTML = '<div class="card"><div class="empty-state">Loading…</div></div>';
 
-    const [reportRes, violationsRes, recordingsRes] = await Promise.all([
+    const [reportRes, violationsRes, recordingsRes, snapshotsRes] = await Promise.all([
       apiGet('getExamReport', { examId }),
       apiGet('getViolations', { examId }),
-      apiGet('getExamRecordings', { examId })
+      apiGet('getExamRecordings', { examId }),
+      apiGet('getExamSnapshotFiles', { examId })
     ]);
+
+    // One shared candidate-name map, from the report (covers every candidate,
+    // including any with snapshots but no recordings yet).
+    const nameByCidGlobal = {};
+    (reportRes.report || []).forEach(r => { nameByCidGlobal[r.candidateId] = r.fullName || ''; });
+    (recordingsRes.recordings || []).forEach(r => {
+      if (!nameByCidGlobal[r.candidateId]) nameByCidGlobal[r.candidateId] = r.fullName || '';
+    });
 
     let html = '<div class="card"><h2>Exam takers</h2>';
     if (reportRes.success && reportRes.report && reportRes.report.length) {
-      html += `<div class="sub">"Suggested action" is advisory, based on the count of conduct flags — the decision on every sitting is yours. Technical issues (e.g. recording upload problems) are the platform's responsibility, not the candidate's, and carry no suggested action.</div>`;
+      html += `<div class="sub"><strong>Passed</strong> is questions correct out of the exam's total question count; <strong>Failed</strong> counts auto-marked questions answered wrongly or left unanswered. Examiner-graded questions (e.g. short answer) are excluded from both and shown as <code>questionsPendingManual</code> in the CSV. "Suggested action" is advisory, based on the count of conduct flags — the decision on every sitting is yours. Technical issues (e.g. recording upload problems) are the platform's responsibility, not the candidate's, and carry no suggested action.</div>`;
       html += '<button class="btn btn-gold btn-sm" id="downloadReportBtn" style="margin-bottom:14px;">Download all exam takers (CSV)</button>';
-      html += '<table><tr><th>Candidate</th><th>Status</th><th>Score</th><th>%</th><th>Answered</th><th>Conduct flags</th><th>Technical issues</th><th>Location</th><th>Suggested action</th></tr>';
+      html += '<table><tr><th>Candidate</th><th>Status</th><th>Passed</th><th>Failed</th><th>%</th><th>Answered</th><th>Conduct flags</th><th>Technical issues</th><th>Location</th><th>Suggested action</th></tr>';
       reportRes.report.forEach(r => {
         const rec = recommendedAction(Number(r.conductViolations) || 0);
         const name = r.fullName ? `${r.fullName} (${r.candidateId})` : r.candidateId;
@@ -1128,6 +1137,7 @@ function attachExaminerHandlers() {
           <td>${escapeHtml(name)}</td>
           <td><span class="badge ${r.status === 'submitted' ? 'badge-ok' : (r.status === 'in_progress' ? 'badge-warn' : 'badge-danger')}">${escapeHtml(r.status)}</span></td>
           <td>${r.score} / ${r.maxScore}</td>
+          <td>${r.questionsFailed !== undefined ? r.questionsFailed : '—'}</td>
           <td>${r.percentScore !== '' && r.percentScore !== undefined ? r.percentScore + '%' : '—'}</td>
           <td>${r.answered}</td>
           <td>${r.conductViolations}</td>
@@ -1162,6 +1172,27 @@ function attachExaminerHandlers() {
     }
     html += '</div>';
 
+    html += '<div class="card"><h2>Pre-exam snapshots</h2>';
+    if (snapshotsRes.success && snapshotsRes.files && snapshotsRes.files.length) {
+      const byCand = {};
+      snapshotsRes.files.forEach(f => {
+        if (!byCand[f.candidateId]) byCand[f.candidateId] = [];
+        byCand[f.candidateId].push(String(f.type).replace('snapshot_', ''));
+      });
+      html += `<div class="sub">The face, back-of-system, right-side and left-side photos each candidate captured before their exam. Click below to download them all as ONE ZIP, with a folder per candidate.</div>`;
+      html += '<button class="btn btn-gold btn-sm" id="downloadAllSnapsBtn" style="margin-bottom:14px;">Download ALL snapshots for this exam (ZIP)</button>';
+      html += '<table><tr><th>Candidate</th><th>Snapshots</th><th>Captured</th></tr>';
+      Object.keys(byCand).sort().forEach(cid => {
+        const nm = nameByCidGlobal[cid] ? `${nameByCidGlobal[cid]} (${cid})` : cid;
+        const kinds = byCand[cid].join(', ');
+        html += `<tr><td>${escapeHtml(nm)}</td><td>${byCand[cid].length} of 4</td><td>${escapeHtml(kinds)}</td></tr>`;
+      });
+      html += '</table>';
+    } else {
+      html += '<div class="empty-state">No snapshots found for this exam yet.</div>';
+    }
+    html += '</div>';
+
     html += '<div class="card"><h2>Violation log (detail)</h2>';
     if (violationsRes.success && violationsRes.violations.length) {
       html += '<table><tr><th>Candidate</th><th>Type</th><th>Detail</th><th>Time</th></tr>';
@@ -1179,14 +1210,15 @@ function attachExaminerHandlers() {
     if (dlBtn) {
       dlBtn.onclick = () => {
         const qLabels = (reportRes.questionKey || []).map(k => k.label);
-        const header = ['candidateId', 'fullName', 'username', 'status', 'startedAt', 'endedAt', 'score', 'maxScore', 'percentScore', 'answered', 'conductViolations', 'technicalIssues', 'suggestedAction', 'latitude', 'longitude', 'locationName'].concat(qLabels);
+        const header = ['candidateId', 'fullName', 'username', 'status', 'startedAt', 'endedAt', 'score', 'maxScore', 'questionsFailed', 'questionsPendingManual', 'percentScore', 'pointsEarned', 'pointsPossible', 'answered', 'conductViolations', 'technicalIssues', 'suggestedAction', 'latitude', 'longitude', 'locationName'].concat(qLabels);
         const lines = [header.join(',')];
         reportRes.report.forEach(r => {
           const rec = recommendedAction(Number(r.conductViolations) || 0);
           const perQ = qLabels.map(l => (r.perQuestion && r.perQuestion[l] !== undefined) ? r.perQuestion[l] : '');
           lines.push([
             r.candidateId, r.fullName, r.username, r.status, r.startedAt, r.endedAt,
-            r.score, r.maxScore, r.percentScore, r.answered, r.conductViolations, r.technicalIssues, rec.label,
+            r.score, r.maxScore, r.questionsFailed, r.questionsPendingManual, r.percentScore,
+            r.pointsEarned, r.pointsPossible, r.answered, r.conductViolations, r.technicalIssues, rec.label,
             r.latitude, r.longitude, r.locationName
           ].concat(perQ).map(csvEscape).join(','));
         });
@@ -1197,9 +1229,13 @@ function attachExaminerHandlers() {
     // Exam-wide ZIP of every candidate's recordings, one folder each
     const allRecBtn = document.getElementById('downloadAllRecBtn');
     if (allRecBtn) {
-      const nameByCid = {};
-      (recordingsRes.recordings || []).forEach(r => { nameByCid[r.candidateId] = r.fullName || ''; });
-      allRecBtn.onclick = () => downloadExamRecordingsZip(examId, nameByCid, allRecBtn);
+      allRecBtn.onclick = () => downloadExamRecordingsZip(examId, nameByCidGlobal, allRecBtn);
+    }
+
+    // Exam-wide ZIP of every candidate's pre-exam snapshots, one folder each
+    const allSnapsBtn = document.getElementById('downloadAllSnapsBtn');
+    if (allSnapsBtn) {
+      allSnapsBtn.onclick = () => downloadExamSnapshotsZip(examId, nameByCidGlobal, allSnapsBtn);
     }
   };
 }
@@ -1211,6 +1247,63 @@ function base64WebSafeToUint8(b64) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
+}
+
+// Fetches every pre-exam snapshot for the WHOLE exam through the backend API
+// and assembles one ZIP with a folder per candidate. Snapshots are small
+// JPEGs, so this is far quicker than the recordings ZIP.
+async function downloadExamSnapshotsZip(examId, nameByCid, btn) {
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  try {
+    if (typeof JSZip === 'undefined') throw new Error('ZIP library did not load — check the internet connection and reload the page.');
+
+    btn.textContent = 'Fetching file list…';
+    const listRes = await apiGet('getExamSnapshotFiles', { examId });
+    if (!listRes.success || !listRes.files || !listRes.files.length) {
+      throw new Error(listRes.error || 'No snapshots found for this exam.');
+    }
+
+    const files = listRes.files;
+    const zip = new JSZip();
+    const folderFor = {};
+    const folderName = (cid) => {
+      const nm = (nameByCid[cid] || '').replace(/[^\w -]/g, '').trim();
+      return nm ? `${nm}_${cid}` : cid;
+    };
+    let done = 0;
+    btn.textContent = `Preparing 0/${files.length}…`;
+
+    const CONCURRENCY = 3;
+    let nextIndex = 0;
+    async function worker() {
+      while (nextIndex < files.length) {
+        const f = files[nextIndex++];
+        const res = await apiGet('getEvidenceFileData', { examId, candidateId: f.candidateId, fileId: f.fileId });
+        if (!res.success) throw new Error(res.error || ('A snapshot for ' + f.candidateId + ' could not be fetched.'));
+        if (!folderFor[f.candidateId]) folderFor[f.candidateId] = zip.folder(folderName(f.candidateId));
+        folderFor[f.candidateId].file(res.name, base64WebSafeToUint8(res.dataBase64));
+        done++;
+        btn.textContent = `Preparing ${done}/${files.length}…`;
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+
+    btn.textContent = 'Zipping…';
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `snapshots_${examId}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    btn.textContent = 'Downloaded ✓';
+    setTimeout(() => { btn.textContent = originalLabel; btn.disabled = false; }, 3000);
+  } catch (e) {
+    btn.textContent = 'Failed — retry';
+    btn.disabled = false;
+    alert('Snapshot download failed: ' + e.message);
+  }
 }
 
 // Fetches every recording segment for the WHOLE exam through the backend
@@ -1786,7 +1879,7 @@ function setRecordingHealth(status) {
 // through the exact same pipeline real exam chunks use. Returns {ok, reason}.
 // This proves camera capture, encoding, base64 transport, Apps Script, and
 // Drive write all work end-to-end before the exam is allowed to begin.
-const REQUIRED_BACKEND_VERSION_PREFIX = 'v2.8';
+const REQUIRED_BACKEND_VERSION_PREFIX = 'v2.9';
 
 async function runRecordingPreflight() {
   // Step 1: confirm the LIVE backend is running current code. A stale
